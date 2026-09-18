@@ -1,0 +1,10 @@
+.git
+.github
+.upstream/.git
+.upstream/**/node_modules
+.upstream/**/.env*
+dist
+**/__pycache__
+.env
+.env.*
+.DS_Store

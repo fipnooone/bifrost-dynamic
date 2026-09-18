@@ -1,0 +1,15 @@
+bifrost-dynamic
+
+Unofficial container packaging of Maxim Bifrost.
+Bifrost: Copyright 2025 H3 Labs Inc. Licensed under Apache-2.0.
+Upstream: https://github.com/maximhq/bifrost
+The exact upstream revision and build inputs are recorded in upstream.env.
+
+This project changes the container build, not Bifrost's Go application source:
+- dynamically link the Bifrost executable instead of forcing static ELF linking;
+- use an Alpine runtime from the same release series as the Go compiler image;
+- include build metadata, license notices, and a separate CI-only native plugin probe.
+
+Not affiliated with or endorsed by Maxim or H3 Labs Inc.
+Third-party components retain their own licenses. See the notices and source
+information under /usr/share/licenses in the image.

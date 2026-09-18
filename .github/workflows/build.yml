@@ -1,0 +1,132 @@
+name: Build
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*-r*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  TEST_IMAGE: bifrost-dynamic:ci
+  DOCKER_BUILD_SUMMARY: 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check repository and prepare pinned upstream
+        id: inputs
+        shell: bash
+        run: |
+          make test
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            python3 scripts/check.py --release-tag "$GITHUB_REF_NAME"
+          fi
+          ./scripts/prepare.sh
+          {
+            echo 'args<<BUILD_ARGS'
+            grep -v '^#' upstream.env | sed '/^$/d'
+            echo "BUILD_REPOSITORY=https://github.com/${GITHUB_REPOSITORY}"
+            echo "BUILD_REVISION=${GITHUB_SHA}"
+            echo "IMAGE_VERSION=${GITHUB_REF_NAME}"
+            echo BUILD_ARGS
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build runtime image, without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          build-args: ${{ steps.inputs.outputs.args }}
+          load: true
+          push: false
+          tags: ${{ env.TEST_IMAGE }}
+          provenance: false
+          cache-from: type=gha,scope=bifrost-dynamic-amd64
+          cache-to: type=gha,scope=bifrost-dynamic-amd64,mode=max
+      - name: Build native test plugin with the same toolchain and module graph
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          target: testkit
+          platforms: linux/amd64
+          build-args: ${{ steps.inputs.outputs.args }}
+          outputs: type=local,dest=dist/testkit
+          push: false
+          cache-from: type=gha,scope=bifrost-dynamic-amd64
+      - name: Run Bifrost and verify native plugin execution
+        run: python3 scripts/smoke.py "$TEST_IMAGE"
+      - name: Export build contract and license notices from the tested image
+        shell: bash
+        run: |
+          cid=$(docker create "$TEST_IMAGE")
+          trap 'docker rm -v "$cid" >/dev/null' EXIT
+          docker cp "$cid:/usr/share/bifrost-build" dist/build-contract
+          docker cp "$cid:/usr/share/licenses" dist/licenses
+      - name: Prepare tested-image handoff for release job
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          docker image inspect --format '{{.Id}}' "$TEST_IMAGE" > dist/release/image-id.txt
+          docker save "$TEST_IMAGE" | gzip -1 > dist/release/image.tar.gz
+          tar -czf dist/release/build-contract.tar.gz -C dist/build-contract .
+          tar -czf dist/release/licenses.tar.gz -C dist/licenses .
+          cp dist/smoke.json dist/release/
+          (cd dist/release && sha256sum image.tar.gz image-id.txt smoke.json \
+            build-contract.tar.gz licenses.tar.gz > HANDOFF-SHA256SUMS)
+      - name: Upload tested image (release runs only)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: tested-image
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Preserve build and smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: diagnostics
+          path: |
+            dist/*.log
+            dist/*.json
+            dist/*.txt
+            dist/build-contract/
+            dist/testkit/build/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    # No registry/release write credentials are present in the build job.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: tested-image
+          path: dist/release
+      - name: Publish the tested image and its compatibility contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/publish.sh
