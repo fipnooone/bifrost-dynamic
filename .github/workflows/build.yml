@@ -64,7 +64,12 @@ jobs:
           build-args: ${{ steps.inputs.outputs.args }}
           outputs: type=local,dest=dist/testkit
           push: false
-          cache-from: type=gha,scope=bifrost-dynamic-amd64
+          # Save the probe as well, without overwriting the runtime cache.
+          # Cache mounts stay builder-local; these caches store completed layers.
+          cache-from: |
+            type=gha,scope=bifrost-dynamic-amd64
+            type=gha,scope=bifrost-dynamic-testkit-amd64
+          cache-to: type=gha,scope=bifrost-dynamic-testkit-amd64,mode=max
       - name: Run Bifrost and verify native plugin execution
         run: python3 scripts/smoke.py "$TEST_IMAGE"
       - name: Export build contract and license notices from the tested image

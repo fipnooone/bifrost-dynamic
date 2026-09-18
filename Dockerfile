@@ -9,7 +9,9 @@ ARG RUNTIME_IMAGE
 FROM ${NODE_IMAGE} AS ui
 WORKDIR /src/ui
 COPY .upstream/ui/package*.json ./
-RUN apk upgrade --no-cache && npm ci
+# Keep npm download archives out of exported layers; node_modules stays cached.
+RUN --mount=type=cache,id=bifrost-dynamic-npm,target=/root/.npm,sharing=locked \
+    apk upgrade --no-cache && npm ci
 COPY .upstream/ui/ ./
 # This is the same UI build command used by the upstream OSS Dockerfile.
 RUN npm run build-enterprise
@@ -21,17 +23,21 @@ RUN apk upgrade --no-cache && apk add --no-cache gcc musl-dev sqlite-dev binutil
 ENV GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=1 GOOS=linux GOARCH=amd64 GOAMD64=v1
 WORKDIR /src/transports
 ARG GO_VERSION
-ARG BIFROST_VERSION
-ARG BIFROST_COMMIT
-ARG BUILD_TAGS
 RUN test "$(go env GOVERSION)" = "go${GO_VERSION}"
 COPY .upstream/transports/go.mod .upstream/transports/go.sum ./
 RUN go mod download && go mod verify
+# Release metadata must not invalidate the dependency-download layer.
+ARG BIFROST_VERSION
+ARG BUILD_TAGS
 COPY .upstream/transports/ ./
 COPY --from=ui /src/ui/out ./bifrost-http/ui
 # Retain sqlite_static for existing-plugin compatibility, but do NOT link libc
 # with -static. The ELF interpreter check below enforces the distinction.
-RUN mkdir -p /out/build && \
+# Build caches are local to BuildKit, not part of exported image/cache layers.
+# Separate caches after C toolchain/library upgrades: Go alone cannot detect them.
+RUN --mount=type=cache,id=bifrost-dynamic-go-${GO_VERSION}-amd64,target=/root/.cache/go-build,sharing=locked \
+    export GOCACHE="/root/.cache/go-build/$(apk info -v | sort | sha256sum | cut -d ' ' -f 1)" && \
+    mkdir -p /out/build && \
     go build -mod=readonly -buildvcs=false -trimpath -tags="${BUILD_TAGS}" \
       -ldflags="-w -s -linkmode=external -X main.Version=${BIFROST_VERSION}" \
       -o /out/bifrost ./bifrost-http && \
@@ -41,8 +47,9 @@ RUN mkdir -p /out/build && \
     go list -m -json all > /out/build/go-modules.json && \
     cp go.mod go.sum /out/build/ && \
     cp docker-entrypoint.sh /out/docker-entrypoint.sh && \
-    apk info -v > /out/build/compiler-apk.txt && \
-    printf '%s\n' "${BIFROST_COMMIT}" > /out/build/upstream-commit.txt
+    apk info -v > /out/build/compiler-apk.txt
+ARG BIFROST_COMMIT
+RUN printf '%s\n' "${BIFROST_COMMIT}" > /out/build/upstream-commit.txt
 COPY upstream.env /out/build/upstream.env
 COPY .upstream/ui/package-lock.json /out/build/ui-package-lock.json
 COPY .upstream-notices/ /out/licenses/bifrost/
@@ -64,7 +71,9 @@ RUN sh /collect-licenses.sh /go/pkg/mod /out/licenses/go && \
 # It is exported for CI, never installed in the final runtime image.
 FROM compiler AS probe
 COPY tests/plugin/main.go ./_image_smoke/main.go
-RUN go build -mod=readonly -buildvcs=false -trimpath -tags="${BUILD_TAGS}" \
+RUN --mount=type=cache,id=bifrost-dynamic-go-${GO_VERSION}-amd64,target=/root/.cache/go-build,sharing=locked \
+    export GOCACHE="/root/.cache/go-build/$(apk info -v | sort | sha256sum | cut -d ' ' -f 1)" && \
+    go build -mod=readonly -buildvcs=false -trimpath -tags="${BUILD_TAGS}" \
     -buildmode=plugin -o /out/smoke.so ./_image_smoke
 
 FROM scratch AS testkit

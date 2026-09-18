@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 from email.message import Message
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -144,6 +146,80 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('refs/tags/transports/', prepare)
         self.assertIn('HOST_MOD_BLOB', prepare)
         self.assertNotIn('git apply', prepare)
+
+
+class BuildCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.dockerfile = (ROOT / 'Dockerfile').read_text()
+        self.workflow = (ROOT / '.github/workflows/build.yml').read_text()
+        # Join Dockerfile continuations to inspect complete RUN instructions.
+        self.runs = [line for line in self.dockerfile.replace('\\\n', '').splitlines()
+                     if line.startswith('RUN ')]
+
+    def test_native_builds_share_toolchain_scoped_cache(self):
+        builds = [line for line in self.runs if 'go build ' in line]
+        self.assertEqual(len(builds), 2)
+        mount = ('--mount=type=cache,id=bifrost-dynamic-go-${GO_VERSION}-amd64,'
+                 'target=/root/.cache/go-build,sharing=locked')
+        for build in builds:
+            with self.subTest(build=build):
+                self.assertIn(mount, build)
+                self.assertIn('export GOCACHE=', build)
+                self.assertIn('-mod=readonly -buildvcs=false -trimpath', build)
+                self.assertIn('-tags="${BUILD_TAGS}"', build)
+                # Outputs and the module graph must not live only in a cache mount.
+                self.assertNotIn('target=/out', build)
+                self.assertNotIn('target=/go/pkg/mod', build)
+        self.assertIn('-linkmode=external', builds[0])
+        self.assertIn('grep -q INTERP', builds[0])
+        self.assertIn('-buildmode=plugin -o /out/smoke.so', builds[1])
+
+    def test_native_cache_changes_with_c_library_versions(self):
+        assignments = re.findall(r'export GOCACHE=("[^"\n]+")', self.dockerfile)
+        self.assertEqual(len(assignments), 2)
+        self.assertEqual(assignments[0], assignments[1])
+
+        def cache_path(packages):
+            # Exercise the actual Dockerfile shell expression with a fake apk.
+            command = ('apk() { printf "%s\\n" "$PACKAGES"; }; '
+                       f'export GOCACHE={assignments[0]}; printf "%s" "$GOCACHE"')
+            return subprocess.run(['sh', '-eu', '-c', command], check=True,
+                                  capture_output=True, text=True,
+                                  env=dict(os.environ, PACKAGES=packages)).stdout
+
+        first = cache_path('gcc-1\nmusl-dev-1')
+        self.assertRegex(first, r'^/root/\.cache/go-build/[0-9a-f]{64}$')
+        self.assertEqual(first, cache_path('musl-dev-1\ngcc-1'))
+        self.assertNotEqual(first, cache_path('gcc-1\nmusl-dev-2'))
+        self.assertNotEqual(first, cache_path('gcc-2\nmusl-dev-1'))
+
+    def test_npm_download_cache_does_not_hide_installed_dependencies(self):
+        install = next(line for line in self.runs if 'npm ci' in line)
+        self.assertIn('target=/root/.npm', install)
+        self.assertNotIn('target=/src/ui/node_modules', install)
+        self.assertIn('RUN npm run build-enterprise', self.dockerfile)
+
+    def test_release_metadata_does_not_invalidate_dependency_downloads(self):
+        download = self.dockerfile.index('RUN go mod download && go mod verify')
+        for arg in ['ARG BIFROST_VERSION', 'ARG BIFROST_COMMIT', 'ARG BUILD_TAGS']:
+            with self.subTest(arg=arg):
+                self.assertGreater(self.dockerfile.index(arg), download)
+        self.assertGreater(self.dockerfile.index('ARG BIFROST_COMMIT'),
+                           self.dockerfile.index('go build '))
+
+    def test_separate_probe_cache_does_not_skip_runtime_verification(self):
+        probe = self.workflow.split('- name: Build native test plugin', 1)[1]
+        probe = probe.split('- name: Run Bifrost', 1)[0]
+        self.assertIn('type=gha,scope=bifrost-dynamic-amd64', probe)
+        self.assertIn('type=gha,scope=bifrost-dynamic-testkit-amd64', probe)
+        self.assertIn('cache-to: type=gha,scope=bifrost-dynamic-testkit-amd64,mode=max', probe)
+        self.assertEqual(self.workflow.count(
+            'cache-to: type=gha,scope=bifrost-dynamic-amd64,'), 1)
+        self.assertNotIn('continue-on-error', self.workflow)
+        self.assertIn('run: python3 scripts/smoke.py "$TEST_IMAGE"', self.workflow)
+        self.assertLess(self.workflow.index('- name: Run Bifrost'),
+                        self.workflow.index('- name: Prepare tested-image handoff'))
+        self.assertIn('needs: build', self.workflow.split('  publish:', 1)[1])
 
 
 if __name__ == '__main__':
