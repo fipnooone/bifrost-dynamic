@@ -16,20 +16,39 @@ import update_upstream as update
 import tag_release
 
 
+MANIFEST = """# Review this manifest as a unit
+BIFROST_VERSION=v2.2.0
+BIFROST_COMMIT=1111111111111111111111111111111111111111
+GO_VERSION=1.27.0
+CORE_VERSION=v1.9.0
+GOOS=linux
+GOARCH=amd64
+GOAMD64=v1
+CGO_ENABLED=1
+BUILD_TAGS=netgo
+
+GO_IMAGE=golang:1.27.0-alpine3.23@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+NODE_IMAGE=node:22-alpine3.23@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+RUNTIME_IMAGE=alpine:3.23@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+HOST_MOD_BLOB=2222222222222222222222222222222222222222
+HOST_SUM_BLOB=3333333333333333333333333333333333333333
+"""
+
+
 class ManifestUpdateTests(unittest.TestCase):
     def test_updates_only_reviewed_pins_preserving_comments(self):
-        original = (SCRIPT_DIR.parent / "upstream.env").read_text()
+        original = MANIFEST
         values = {"BIFROST_VERSION": "v2.2.6", "BIFROST_COMMIT": "a" * 40, "CORE_VERSION": "v1.9.1", "HOST_MOD_BLOB": "b" * 40, "HOST_SUM_BLOB": "c" * 40}
         result = update.render_manifest(original, values)
-        self.assertIn("# Review this manifest as a unit", result)
-        self.assertIn("GO_VERSION=1.27.0", result)
-        self.assertIn("BIFROST_VERSION=v2.2.6", result)
+        unchanged = lambda text: [line for line in text.splitlines(keepends=True) if line.split("=", 1)[0] not in values]
+        self.assertEqual(unchanged(result), unchanged(original))
         with tempfile.NamedTemporaryFile("w", delete=False) as stream:
             stream.write(result)
             path = Path(stream.name)
         try:
             from check import read_manifest
-            self.assertEqual(read_manifest(path)["HOST_SUM_BLOB"], "c" * 40)
+            manifest = read_manifest(path)
+            self.assertEqual({key: manifest[key] for key in values}, values)
         finally:
             path.unlink()
 
@@ -116,7 +135,7 @@ class ManifestUpdateTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
 
     def test_failed_atomic_update_preserves_manifest(self):
-        original = (SCRIPT_DIR.parent / "upstream.env").read_text()
+        original = MANIFEST
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "upstream.env"
             path.write_text(original)
@@ -130,7 +149,7 @@ class ManifestUpdateTests(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()), [path])
 
     def test_tag_cli_compares_event_commits_and_skips_unchanged_or_lower(self):
-        original = (SCRIPT_DIR.parent / "upstream.env").read_text()
+        original = MANIFEST
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             def git(*args):
