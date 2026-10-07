@@ -100,6 +100,8 @@ def run_case(image_id: str, upstream_port: int, plugin: Path, enabled: bool, dis
             "custom_provider_config": {"base_provider_type": "openai", "is_key_less": True},
             "network_config": {"base_url": f"http://127.0.0.1:{upstream_port}", "max_retries": 0},
         }}}
+        # The loopback-only plugin probe does not exercise inference authentication.
+        config["client"] = {"enforce_auth_on_inference": False}
         if enabled:
             config["plugins"] = [{"name": "dynamic-image-smoke", "enabled": True,
                                   "path": "/smoke/plugin.so", "config": {"marker": MARKER}}]
