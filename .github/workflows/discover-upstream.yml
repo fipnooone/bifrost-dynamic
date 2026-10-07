@@ -1,0 +1,53 @@
+name: Discover upstream Bifrost release
+on:
+  schedule:
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bifrost-upstream-discovery
+  cancel-in-progress: false
+jobs:
+  update:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Discover and validate update
+        run: python3 scripts/update_upstream.py
+      - name: Check for manifest changes
+        id: changes
+        run: |
+          if ! git diff --quiet -- upstream.env; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            version=$(grep '^BIFROST_VERSION=' upstream.env | cut -d= -f2)
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "release-url=https://github.com/maximhq/bifrost/releases/tag/transports/$version" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create repository-scoped App token
+        if: steps.changes.outputs.changed == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Propose manifest update
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: automation/update-bifrost-upstream
+          base: main
+          add-paths: upstream.env
+          commit-message: 'chore: update Bifrost upstream pins'
+          title: 'Update Bifrost upstream pins to ${{ steps.changes.outputs.version }}'
+          body: |
+            Upstream release: ${{ steps.changes.outputs.release-url }}
+            Review the complete upstream manifest change before merging.

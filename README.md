@@ -6,25 +6,15 @@ The official Bifrost Docker image is statically linked, so custom `.so` plugins 
 
 ## Image
 
-Current target:
+[upstream.env](upstream.env) defines the current build target, including the Bifrost and Go versions. Builds target `linux/amd64` on Alpine / musl.
 
-- Bifrost: `v2.2.0`
-- Go: `1.27.0`
-- Platform: `linux/amd64`
-- Runtime: Alpine / musl
+See [Releases](https://github.com/fipnooone/bifrost-dynamic/releases) for published image versions and their compatibility contracts. A build target or merged update does not mean its image has been published.
 
-Published images:
-
-```text
-ghcr.io/fipnooone/bifrost-dynamic:v2.2.0-r1
-ghcr.io/fipnooone/bifrost-dynamic:v2.2.0-r1-amd64
-```
-
-`r1` is the build revision for this project, not a Bifrost version.
+Image tags follow `v<BIFROST_VERSION>-r<BUILD_REVISION>` (also available with an `-amd64` suffix). `r1` is the build revision for this project, not a Bifrost version.
 
 ## Usage
 
-Use the image exactly like the official Bifrost image:
+Use the image exactly like the official Bifrost image. This Compose example is pinned to a historical version, not the latest release; select a published version from Releases:
 
 ```yaml
 services:
@@ -53,20 +43,18 @@ A plugin built for one Bifrost release should not be assumed compatible with ano
 
 GitHub Actions builds and validates the image on pushes and pull requests.
 
-Release tags follow:
+1. [Discover upstream Bifrost release](.github/workflows/discover-upstream.yml) runs daily at 08:17 UTC or manually via `workflow_dispatch` on `main`. It proposes an `upstream.env`-only PR for a newer stable transports release.
+2. Review the manifest PR and wait for CI, then merge it manually. Upstream Go version or transports Dockerfile changes fail closed and require manual review; discovery does not update toolchain or image pins automatically.
+3. After a Bifrost version increase reaches `main`, the [Build workflow](.github/workflows/build.yml) waits for its `build` job, including native plugin smoke tests, to succeed for that exact merged commit. Only then does its `tag` job use the GitHub App to create the version's `r1` tag at that commit.
+4. That tag triggers the existing [Build workflow](.github/workflows/build.yml), which verifies Bifrost startup and native test plugin execution before publishing the tested image to GHCR and creating a release. Publication is complete only after that workflow succeeds, not when the PR merges.
 
-```text
-v<BIFROST_VERSION>-r<BUILD_REVISION>
-```
+Rebuilds of the same Bifrost version remain manual: create and push an `r2`, `r3`, or later revision tag at the reviewed commit whose manifest matches the version. For example, a second build of the historical version above would use `v2.2.0-r2`. Same-version manifest changes do not automatically create another tag.
 
-Example:
+### Automation prerequisites
 
-```bash
-git tag -a v2.2.0-r1 -m "Bifrost 2.2.0 dynamic build 1"
-git push origin v2.2.0-r1
-```
-
-The release workflow verifies that Bifrost starts and can actually load and execute a native test plugin before publishing the image to GHCR.
+- Create a GitHub App with repository permissions **Contents: Read and write** and **Pull requests: Read and write**. Install it for **Only select repositories**, selecting this repository.
+- Set the repository Actions variable `APP_ID` to the App ID and the repository Actions secret `APP_PRIVATE_KEY` to its generated PEM private key. App-authenticated PRs and tags allow downstream CI to run.
+- Protect `main`: require a pull request and the Build workflow's `build` status check before merging, and prevent bypasses (including by the App). Tag creation also requires the post-merge build and smoke tests to succeed; a failed or cancelled build does not create a tag.
 
 ## Disclaimer
 
