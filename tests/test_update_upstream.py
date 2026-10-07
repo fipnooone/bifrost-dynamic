@@ -100,11 +100,28 @@ class ManifestUpdateTests(unittest.TestCase):
         next_url = "https://api.github.com/repositories/951115072/releases?per_page=100&page=2"
         responses = [self.release_response(first, next_url), self.release_response(last)]
         with patch.object(update.urllib.request, "urlopen", side_effect=responses) as request:
-            releases = update.fetch_releases("test-token")
+            releases = update.fetch_releases()
         self.assertEqual(len(releases), 2)
         self.assertEqual(update.latest_release(releases), "v2.4.0")
         self.assertEqual([call.args[0].full_url for call in request.call_args_list], [update.API.format(1), next_url])
-        self.assertEqual(request.call_args.args[0].get_header("Authorization"), "Bearer test-token")
+        for call in request.call_args_list:
+            self.assertIsNone(call.args[0].get_header("Authorization"))
+
+    def test_discovery_ignores_environment_token_for_public_releases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "upstream.env"
+            manifest.write_text(MANIFEST)
+            responses = [self.release_response([], update.API.format(2)),
+                         self.release_response([{"tag_name": "transports/v2.2.0"}])]
+            with patch.object(update, "ROOT", root), patch.dict(os.environ, {"GITHUB_TOKEN": "must-not-be-sent"}):
+                with patch.object(update.urllib.request, "urlopen", side_effect=responses) as request:
+                    update.main()
+            self.assertEqual(request.call_count, 2)
+            for call in request.call_args_list:
+                self.assertIsNone(call.args[0].get_header("Authorization"))
+                self.assertEqual(call.args[0].get_header("Accept"), "application/vnd.github+json")
+            self.assertEqual(manifest.read_text(), MANIFEST)
 
     def test_release_pagination_stops_without_next_on_full_page(self):
         response = self.release_response([{"tag_name": "transports/v2.3.0"}] * 100)
@@ -184,6 +201,31 @@ class ManifestUpdateTests(unittest.TestCase):
     def test_cli_import(self):
         result = subprocess.run([sys.executable, "-c", "import update_upstream; import tag_release"], cwd=SCRIPT_DIR, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+
+class ReleasePipelineTests(unittest.TestCase):
+    def test_tag_waits_for_merge_build_and_targets_exact_commit(self):
+        workflows = SCRIPT_DIR.parent / ".github/workflows"
+        workflow = (workflows / "build.yml").read_text()
+        build, rest = workflow.split("  build:\n", 1)[1].split("\n  tag:\n", 1)
+        tag = rest.split("\n  publish:\n", 1)[0]
+        self.assertIn("    needs: build\n", tag)
+        self.assertIn("    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n", tag)
+        self.assertNotIn("continue-on-error", build + tag)
+        smoke = next(step for step in build.split("      - ") if "run: python3 scripts/smoke.py" in step)
+        self.assertNotIn("if:", smoke)
+        self.assertIn('run: python3 scripts/smoke.py "$TEST_IMAGE"\n', smoke)
+        for setting in ("ref: ${{ github.sha }}", "fetch-depth: 0", "persist-credentials: false",
+                        "permission-contents: write", "BEFORE_SHA: ${{ github.event.before }}",
+                        "GITHUB_SHA: ${{ github.sha }}", "run: python3 scripts/tag_release.py"):
+            self.assertIn(setting + "\n", tag)
+        self.assertIn("      group: bifrost-release-tag\n      cancel-in-progress: false\n", tag)
+        self.assertFalse((workflows / "tag-bifrost-release.yml").exists())
+
+    def test_discovery_workflow_does_not_supply_repository_token(self):
+        workflow = (SCRIPT_DIR.parent / ".github/workflows/discover-upstream.yml").read_text()
+        self.assertIn("run: python3 scripts/update_upstream.py", workflow)
+        self.assertNotIn("GITHUB_TOKEN", workflow)
 
 
 class PublishTagTests(unittest.TestCase):

@@ -42,13 +42,13 @@ def latest_release(releases) -> str | None:
     return max(found)[1] if found else None
 
 
-def fetch_releases(token: str | None = None):
+def fetch_releases():
     releases = []
     url = API.format(1)
     # GitHub advertises page 11 but rejects results beyond the first 1,000.
     # Select the semantic maximum stable transports version in this recent window.
     for _ in range(MAX_RELEASE_PAGES):
-        request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})})
+        request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(request, timeout=30) as response:
             batch = json.load(response)
             link = response.headers.get("Link", "")
@@ -126,7 +126,7 @@ def main():
     path = ROOT / "upstream.env"
     original = path.read_text()
     current = read_manifest(path)
-    tag = latest_release(fetch_releases(os.environ.get("GITHUB_TOKEN")))
+    tag = latest_release(fetch_releases())
     if not tag or version_key(tag) <= version_key(current["BIFROST_VERSION"]):
         return
     pins = candidate_pins(tag, current)

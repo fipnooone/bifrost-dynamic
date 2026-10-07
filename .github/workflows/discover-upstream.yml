@@ -20,8 +20,6 @@ jobs:
           persist-credentials: false
       - name: Discover and validate update
         run: python3 scripts/update_upstream.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Check for manifest changes
         id: changes
         run: |
