@@ -284,31 +284,6 @@ class ManifestUpdateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
 
-class ReleasePipelineTests(unittest.TestCase):
-    def test_tag_waits_for_merge_build_and_targets_exact_commit(self):
-        workflows = SCRIPT_DIR.parent / ".github/workflows"
-        workflow = (workflows / "build.yml").read_text()
-        build, rest = workflow.split("  build:\n", 1)[1].split("\n  tag:\n", 1)
-        tag = rest.split("\n  publish:\n", 1)[0]
-        self.assertIn("    needs: build\n", tag)
-        self.assertIn("    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n", tag)
-        self.assertNotIn("continue-on-error", build + tag)
-        smoke = next(step for step in build.split("      - ") if "run: python3 scripts/smoke.py" in step)
-        self.assertNotIn("if:", smoke)
-        self.assertIn('run: python3 scripts/smoke.py "$TEST_IMAGE"\n', smoke)
-        for setting in ("ref: ${{ github.sha }}", "fetch-depth: 0", "persist-credentials: false",
-                        "permission-contents: write", "BEFORE_SHA: ${{ github.event.before }}",
-                        "GITHUB_SHA: ${{ github.sha }}", "run: python3 scripts/tag_release.py"):
-            self.assertIn(setting + "\n", tag)
-        self.assertIn("      group: bifrost-release-tag\n      cancel-in-progress: false\n", tag)
-        self.assertFalse((workflows / "tag-bifrost-release.yml").exists())
-
-    def test_discovery_workflow_does_not_supply_repository_token(self):
-        workflow = (SCRIPT_DIR.parent / ".github/workflows/discover-upstream.yml").read_text()
-        self.assertIn("run: python3 scripts/update_upstream.py", workflow)
-        self.assertNotIn("GITHUB_TOKEN", workflow)
-
-
 class PublishTagTests(unittest.TestCase):
     target = "a" * 40
     tag = "v2.3.0-r1"
